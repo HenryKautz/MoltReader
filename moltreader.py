@@ -421,8 +421,9 @@ class TextToSpeechEngine:
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
 
-        # Callback for status updates
+        # Callbacks for status and text updates
         self.status_callback = None
+        self.text_callback = None
 
     def set_content(self, content_items: List[Tuple[str, str]]):
         """
@@ -509,10 +510,12 @@ class TextToSpeechEngine:
             # Get voice for this author
             voice = self.voice_manager.get_voice_for_agent(author)
 
-            # Update status with author, voice, and text content
+            # Update status (speaker info) and text display separately
             if self.status_callback:
                 progress = f"[{self.current_index + 1}/{len(self.content_queue)}]"
-                self.status_callback(f"{progress} {author} (voice: {voice}):\n\n{text}")
+                self.status_callback(f"{progress} {author} (voice: {voice})")
+            if self.text_callback:
+                self.text_callback(text)
 
             # Speak the text
             success = self._speak(text, voice)
@@ -579,18 +582,19 @@ class MoltReaderApp:
         self.scraper = MoltbookScraper()
         self.tts_engine = TextToSpeechEngine(self.voice_manager)
 
-        # Set up TTS status callback
+        # Set up TTS callbacks for status and text display
         self.tts_engine.status_callback = self._update_status
+        self.tts_engine.text_callback = self._update_current_text
 
         # Create main window
         self.root = tk.Tk()
         self.root.title("MoltReader - Moltbook Text-to-Speech")
-        self.root.geometry("600x300")
-        self.root.minsize(500, 250)
+        self.root.geometry("600x450")
+        self.root.minsize(500, 400)
 
         # Configure grid weights for resizing
         self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(2, weight=1)
+        self.root.rowconfigure(3, weight=1)  # Text area gets most space
 
         # Build UI
         self._create_widgets()
@@ -667,29 +671,42 @@ class MoltReaderApp:
         )
         self.quit_btn.grid(row=0, column=4, padx=5)
 
-        # --- Status Section ---
-        status_frame = ttk.LabelFrame(main_frame, text="Status", padding="5")
-        status_frame.grid(row=2, column=0, columnspan=2, sticky="nsew")
+        # --- Status Section (compact, for speaker/voice info) ---
+        status_frame = ttk.LabelFrame(main_frame, text="Now Playing", padding="5")
+        status_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 10))
         status_frame.columnconfigure(0, weight=1)
-        status_frame.rowconfigure(0, weight=1)
 
-        # Status text area
-        self.status_text = tk.Text(
+        # Status label (single line for speaker info)
+        self.status_var = tk.StringVar(value="Ready. Paste a Moltbook URL and click Load.")
+        self.status_label = ttk.Label(
             status_frame,
-            height=6,
+            textvariable=self.status_var,
+            font=('Menlo', 11),
+            wraplength=550
+        )
+        self.status_label.grid(row=0, column=0, sticky="ew")
+
+        # --- Current Text Section (larger, for post/comment content) ---
+        text_frame = ttk.LabelFrame(main_frame, text="Current Text", padding="5")
+        text_frame.grid(row=3, column=0, columnspan=2, sticky="nsew")
+        text_frame.columnconfigure(0, weight=1)
+        text_frame.rowconfigure(0, weight=1)
+        main_frame.rowconfigure(3, weight=1)
+
+        # Text display area
+        self.current_text = tk.Text(
+            text_frame,
+            height=10,
             state='disabled',
             font=('Menlo', 11),
             wrap='word'
         )
-        self.status_text.grid(row=0, column=0, sticky="nsew")
+        self.current_text.grid(row=0, column=0, sticky="nsew")
 
-        # Scrollbar for status
-        scrollbar = ttk.Scrollbar(status_frame, orient='vertical', command=self.status_text.yview)
+        # Scrollbar for text
+        scrollbar = ttk.Scrollbar(text_frame, orient='vertical', command=self.current_text.yview)
         scrollbar.grid(row=0, column=1, sticky='ns')
-        self.status_text.configure(yscrollcommand=scrollbar.set)
-
-        # Initial status
-        self._update_status("Ready. Paste a Moltbook URL and click Load.")
+        self.current_text.configure(yscrollcommand=scrollbar.set)
 
     def _on_url_focus(self, event):
         """Clear placeholder text when URL field is focused."""
@@ -726,13 +743,13 @@ class MoltReaderApp:
         self.tts_engine.set_content(content)
         self.voice_manager.reset()
 
-        # Display what we found
-        status_lines = [f"Loaded {len(content)} items to read:"]
-        for author, text in content:
-            preview = text[:50] + "..." if len(text) > 50 else text
-            status_lines.append(f"  • {author}: {preview}")
+        # Show summary in status
+        self._update_status(f"Loaded {len(content)} items. Click Play to start.")
 
-        self._update_status("\n".join(status_lines))
+        # Show first item preview in text area
+        if content:
+            author, text = content[0]
+            self._update_current_text(f"[First item by {author}]\n\n{text}")
 
     def _on_play(self):
         """Handle Play button click."""
@@ -757,6 +774,7 @@ class MoltReaderApp:
         """Handle Stop button click - stop and reset to beginning."""
         self.tts_engine.stop()
         self._update_status("Stopped. Ready to play from beginning.")
+        self._update_current_text("")  # Clear the text display
 
     def _on_quit(self):
         """Handle Quit button or window close."""
@@ -765,16 +783,25 @@ class MoltReaderApp:
 
     def _update_status(self, message: str):
         """
-        Update the status text area.
+        Update the status label (speaker/voice info).
 
         Args:
             message: Status message to display.
         """
-        self.status_text.configure(state='normal')
-        self.status_text.delete(1.0, tk.END)
-        self.status_text.insert(tk.END, message)
-        self.status_text.configure(state='disabled')
-        self.status_text.see(tk.END)
+        self.status_var.set(message)
+
+    def _update_current_text(self, text: str):
+        """
+        Update the current text display area.
+
+        Args:
+            text: The post/comment text being read.
+        """
+        self.current_text.configure(state='normal')
+        self.current_text.delete(1.0, tk.END)
+        self.current_text.insert(tk.END, text)
+        self.current_text.configure(state='disabled')
+        self.current_text.see("1.0")  # Scroll to top
 
     def run(self):
         """Start the application main loop."""
