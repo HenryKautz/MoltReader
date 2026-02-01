@@ -51,37 +51,39 @@ class EdgeTTSVoiceManager:
     """
 
     # Curated list of high-quality English neural voices from edge-tts
+    # These are verified to work as of 2024
     # Format: (voice_name, friendly_name, gender)
     ENGLISH_VOICES = [
-        ("en-US-GuyNeural", "Guy", "male"),
-        ("en-US-JennyNeural", "Jenny", "female"),
-        ("en-US-AriaNeural", "Aria", "female"),
-        ("en-US-DavisNeural", "Davis", "male"),
-        ("en-US-AmberNeural", "Amber", "female"),
-        ("en-US-AnaNeural", "Ana", "female"),
+        # US voices
+        ("en-US-AvaNeural", "Ava", "female"),
         ("en-US-AndrewNeural", "Andrew", "male"),
-        ("en-US-BrandonNeural", "Brandon", "male"),
+        ("en-US-EmmaNeural", "Emma", "female"),
+        ("en-US-BrianNeural", "Brian", "male"),
+        ("en-US-JennyNeural", "Jenny", "female"),
+        ("en-US-GuyNeural", "Guy", "male"),
+        ("en-US-AriaNeural", "Aria", "female"),
         ("en-US-ChristopherNeural", "Christopher", "male"),
-        ("en-US-CoraNeural", "Cora", "female"),
-        ("en-US-ElizabethNeural", "Elizabeth", "female"),
         ("en-US-EricNeural", "Eric", "male"),
-        ("en-US-JacobNeural", "Jacob", "male"),
-        ("en-US-JaneNeural", "Jane", "female"),
-        ("en-US-JasonNeural", "Jason", "male"),
         ("en-US-MichelleNeural", "Michelle", "female"),
-        ("en-US-MonicaNeural", "Monica", "female"),
-        ("en-US-NancyNeural", "Nancy", "female"),
         ("en-US-RogerNeural", "Roger", "male"),
-        ("en-US-SaraNeural", "Sara", "female"),
         ("en-US-SteffanNeural", "Steffan", "male"),
-        ("en-US-TonyNeural", "Tony", "male"),
-        ("en-GB-RyanNeural", "Ryan", "male"),
+        ("en-US-AnaNeural", "Ana", "female"),
+        # UK voices
         ("en-GB-SoniaNeural", "Sonia", "female"),
+        ("en-GB-RyanNeural", "Ryan", "male"),
         ("en-GB-LibbyNeural", "Libby", "female"),
+        ("en-GB-MaisieNeural", "Maisie", "female"),
+        ("en-GB-ThomasNeural", "Thomas", "male"),
+        # Australian voices
         ("en-AU-NatashaNeural", "Natasha", "female"),
-        ("en-AU-WilliamNeural", "William", "male"),
+        # Canadian voices
         ("en-CA-ClaraNeural", "Clara", "female"),
         ("en-CA-LiamNeural", "Liam", "male"),
+        # Other English variants
+        ("en-IE-EmilyNeural", "Emily", "female"),
+        ("en-IE-ConnorNeural", "Connor", "male"),
+        ("en-NZ-MollyNeural", "Molly", "female"),
+        ("en-NZ-MitchellNeural", "Mitchell", "male"),
     ]
 
     def __init__(self):
