@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-MoltReader - A Text-to-Speech Reader for Moltbook Posts
+MoltReader - A Cross-Platform Text-to-Speech Reader for Moltbook Posts
 
-This program reads Moltbook posts and comments aloud using macOS text-to-speech.
-Each poster/commenter is assigned a unique voice (chosen randomly) that persists
-throughout the reading session.
+This program reads Moltbook posts and comments aloud using edge-tts (Microsoft's
+neural text-to-speech). Each poster/commenter is assigned a unique voice (chosen
+randomly) that persists throughout the reading session.
 
 Requirements:
-    - macOS (uses built-in 'say' command for text-to-speech)
     - Python 3.7+
+    - edge-tts: pip install edge-tts
     - playwright: pip install playwright && playwright install chromium
     - beautifulsoup4: pip install beautifulsoup4
+    - pygame: pip install pygame (for audio playback)
 
 Usage:
     python moltreader.py
@@ -20,98 +21,82 @@ License: MIT (Open Source)
 
 import tkinter as tk
 from tkinter import ttk, messagebox
-import subprocess
 import threading
 import random
 import re
+import asyncio
+import tempfile
+import os
 from typing import Dict, List, Tuple, Optional
-import queue
 
 # Third-party imports (need to be installed)
 try:
     from bs4 import BeautifulSoup
     from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+    import edge_tts
+    import pygame
 except ImportError as e:
     print("Please install required packages:")
-    print("  pip install beautifulsoup4 playwright")
+    print("  pip install beautifulsoup4 playwright edge-tts pygame")
     print("  playwright install chromium")
     raise e
 
 
-class MacOSVoiceManager:
+class EdgeTTSVoiceManager:
     """
-    Manages macOS text-to-speech voices.
+    Manages Microsoft Edge text-to-speech voices.
 
-    Uses the built-in 'say' command which is available on all macOS systems.
-    Discovers available voices and assigns them randomly to speakers.
+    Uses edge-tts library to access high-quality neural voices.
+    Works cross-platform (macOS, Windows, Linux).
     """
+
+    # Curated list of high-quality English neural voices from edge-tts
+    # These are verified to work as of 2024
+    # Format: (voice_name, friendly_name, gender)
+    ENGLISH_VOICES = [
+        # US voices
+        ("en-US-AvaNeural", "Ava", "female"),
+        ("en-US-AndrewNeural", "Andrew", "male"),
+        ("en-US-EmmaNeural", "Emma", "female"),
+        ("en-US-BrianNeural", "Brian", "male"),
+        ("en-US-JennyNeural", "Jenny", "female"),
+        ("en-US-GuyNeural", "Guy", "male"),
+        ("en-US-AriaNeural", "Aria", "female"),
+        ("en-US-ChristopherNeural", "Christopher", "male"),
+        ("en-US-EricNeural", "Eric", "male"),
+        ("en-US-MichelleNeural", "Michelle", "female"),
+        ("en-US-RogerNeural", "Roger", "male"),
+        ("en-US-SteffanNeural", "Steffan", "male"),
+        ("en-US-AnaNeural", "Ana", "female"),
+        # UK voices
+        ("en-GB-SoniaNeural", "Sonia", "female"),
+        ("en-GB-RyanNeural", "Ryan", "male"),
+        ("en-GB-LibbyNeural", "Libby", "female"),
+        ("en-GB-MaisieNeural", "Maisie", "female"),
+        ("en-GB-ThomasNeural", "Thomas", "male"),
+        # Australian voices
+        ("en-AU-NatashaNeural", "Natasha", "female"),
+        # Canadian voices
+        ("en-CA-ClaraNeural", "Clara", "female"),
+        ("en-CA-LiamNeural", "Liam", "male"),
+        # Other English variants
+        ("en-IE-EmilyNeural", "Emily", "female"),
+        ("en-IE-ConnorNeural", "Connor", "male"),
+        ("en-NZ-MollyNeural", "Molly", "female"),
+        ("en-NZ-MitchellNeural", "Mitchell", "male"),
+    ]
 
     def __init__(self):
         # Dictionary mapping agent names to their assigned voices
-        self.agent_voices: Dict[str, str] = {}
+        self.agent_voices: Dict[str, Tuple[str, str]] = {}
 
-        # Get list of available voices from macOS
-        self.available_voices = self._get_available_voices()
+        # Available voices (voice_id, friendly_name)
+        self.available_voices = [(v[0], v[1]) for v in self.ENGLISH_VOICES]
 
         # Keep track of which voices have been assigned
         self.assigned_voices: List[str] = []
 
-    def _get_available_voices(self) -> List[str]:
-        """
-        Query macOS for available text-to-speech voices.
-
-        Returns:
-            List of voice names available on this system.
-        """
-        try:
-            # Run 'say -v ?' to get list of all available voices
-            result = subprocess.run(
-                ['say', '-v', '?'],
-                capture_output=True,
-                text=True,
-                check=True
-            )
-
-            voices = []
-            for line in result.stdout.strip().split('\n'):
-                # Each line format: "VoiceName  language  # Sample text"
-                # Extract just the voice name (first word/phrase before the language code)
-                if line.strip():
-                    # Voice name is everything before the language code (e.g., "en_US")
-                    match = re.match(r'^(\S+)', line)
-                    if match:
-                        voices.append(match.group(1))
-
-            # Filter to prefer English voices for better pronunciation
-            english_voices = [v for v in voices if self._is_english_voice(v)]
-
-            # If we have English voices, prefer those; otherwise use all
-            return english_voices if english_voices else voices
-
-        except subprocess.CalledProcessError:
-            # Fallback to some common macOS voices if query fails
-            return ['Alex', 'Samantha', 'Victoria', 'Tom', 'Karen', 'Daniel']
-
-    def _is_english_voice(self, voice_name: str) -> bool:
-        """
-        Check if a voice is likely an English voice based on its name.
-
-        This is a heuristic - we check against known English voice names.
-        """
-        # Common English voice names on macOS
-        english_names = [
-            'Alex', 'Samantha', 'Victoria', 'Tom', 'Karen', 'Daniel',
-            'Moira', 'Tessa', 'Veena', 'Fiona', 'Rishi', 'Aaron',
-            'Nicky', 'Allison', 'Ava', 'Susan', 'Zoe', 'Evan',
-            'Nathan', 'Oliver', 'Matilda', 'Reed', 'Rocko', 'Sandy',
-            'Shelley', 'Fred', 'Ralph', 'Kathy', 'Vicki', 'Bruce',
-            'Junior', 'Albert', 'Bahh', 'Bells', 'Boing', 'Bubbles',
-            'Cellos', 'Deranged', 'Good', 'Hysterical', 'Organ', 'Bad',
-            'Trinoids', 'Whisper', 'Wobble', 'Zarvox'
-        ]
-        return voice_name in english_names
-
-    def get_voice_for_agent(self, agent_name: str) -> str:
+    def get_voice_for_agent(self, agent_name: str) -> Tuple[str, str]:
         """
         Get or assign a voice for a given agent (poster/commenter).
 
@@ -122,14 +107,14 @@ class MacOSVoiceManager:
             agent_name: The name/identifier of the poster or commenter.
 
         Returns:
-            The voice name to use for this agent.
+            Tuple of (voice_id, friendly_name) to use for this agent.
         """
         # Check if agent already has a voice assigned
         if agent_name in self.agent_voices:
             return self.agent_voices[agent_name]
 
         # Find voices that haven't been assigned yet
-        unassigned = [v for v in self.available_voices if v not in self.assigned_voices]
+        unassigned = [v for v in self.available_voices if v[0] not in self.assigned_voices]
 
         if unassigned:
             # Pick a random unassigned voice
@@ -140,7 +125,7 @@ class MacOSVoiceManager:
 
         # Remember the assignment
         self.agent_voices[agent_name] = voice
-        self.assigned_voices.append(voice)
+        self.assigned_voices.append(voice[0])
 
         return voice
 
@@ -398,14 +383,18 @@ class MoltbookScraper:
 
 class TextToSpeechEngine:
     """
-    Manages text-to-speech playback using macOS 'say' command.
+    Manages text-to-speech playback using edge-tts and pygame.
 
+    Uses Microsoft's neural TTS voices for high-quality speech.
     Supports play, pause, and stop functionality.
     Runs speech in a background thread to keep UI responsive.
     """
 
-    def __init__(self, voice_manager: MacOSVoiceManager):
+    def __init__(self, voice_manager: EdgeTTSVoiceManager):
         self.voice_manager = voice_manager
+
+        # Initialize pygame mixer for audio playback
+        pygame.mixer.init()
 
         # Current playback state
         self.is_playing = False
@@ -417,9 +406,12 @@ class TextToSpeechEngine:
 
         # Threading components
         self.speech_thread: Optional[threading.Thread] = None
-        self.current_process: Optional[subprocess.Popen] = None
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
+        self.skip_requested = False
+
+        # Temp file for current audio
+        self.current_audio_file: Optional[str] = None
 
         # Callbacks for status and text updates
         self.status_callback = None
@@ -440,6 +432,7 @@ class TextToSpeechEngine:
         if self.is_paused:
             # Resume from pause
             self.is_paused = False
+            pygame.mixer.music.unpause()
             self.pause_event.set()
             return
 
@@ -464,28 +457,51 @@ class TextToSpeechEngine:
         if self.is_playing and not self.is_paused:
             self.is_paused = True
             self.pause_event.clear()
-
-            # Kill current speech process to pause immediately
-            if self.current_process:
-                self.current_process.terminate()
+            pygame.mixer.music.pause()
 
     def stop(self):
         """Stop playback and reset to beginning."""
         self.stop_event.set()
         self.pause_event.set()  # Unblock if paused
 
-        # Kill current speech process
-        if self.current_process:
-            self.current_process.terminate()
-            self.current_process = None
+        # Stop audio playback
+        pygame.mixer.music.stop()
 
         # Reset state
         self.is_playing = False
         self.is_paused = False
         self.current_index = 0
 
+        # Clean up temp file
+        self._cleanup_audio_file()
+
         # Reset voice assignments for fresh start
         self.voice_manager.reset()
+
+    def skip(self):
+        """Skip to the next item in the queue."""
+        if not self.is_playing:
+            return
+
+        # Set skip flag so speech loop knows to continue to next item
+        self.skip_requested = True
+
+        # Stop current audio playback
+        pygame.mixer.music.stop()
+
+        # Ensure we're not paused
+        if self.is_paused:
+            self.is_paused = False
+            self.pause_event.set()
+
+    def _cleanup_audio_file(self):
+        """Remove temporary audio file if it exists."""
+        if self.current_audio_file and os.path.exists(self.current_audio_file):
+            try:
+                os.remove(self.current_audio_file)
+            except:
+                pass
+            self.current_audio_file = None
 
     def _speech_loop(self):
         """
@@ -508,17 +524,23 @@ class TextToSpeechEngine:
             author, text = self.content_queue[self.current_index]
 
             # Get voice for this author
-            voice = self.voice_manager.get_voice_for_agent(author)
+            voice_id, voice_name = self.voice_manager.get_voice_for_agent(author)
 
             # Update status (speaker info) and text display separately
             if self.status_callback:
                 progress = f"[{self.current_index + 1}/{len(self.content_queue)}]"
-                self.status_callback(f"{progress} {author} (voice: {voice})")
+                self.status_callback(f"{progress} {author} (voice: {voice_name})")
             if self.text_callback:
                 self.text_callback(text)
 
             # Speak the text
-            success = self._speak(text, voice)
+            success = self._speak(text, voice_id)
+
+            # Check if skip was requested (speech was interrupted but we should continue)
+            if self.skip_requested:
+                self.skip_requested = False
+                self.current_index += 1
+                continue
 
             if not success or self.stop_event.is_set():
                 break
@@ -529,41 +551,69 @@ class TextToSpeechEngine:
 
         # Playback finished
         self.is_playing = False
+        self._cleanup_audio_file()
         if self.status_callback and not self.stop_event.is_set():
             self.status_callback("Finished reading")
 
-    def _speak(self, text: str, voice: str) -> bool:
+    def _speak(self, text: str, voice_id: str) -> bool:
         """
-        Speak text using macOS 'say' command.
+        Speak text using edge-tts and pygame.
 
         Args:
             text: The text to speak.
-            voice: The voice name to use.
+            voice_id: The edge-tts voice ID to use.
 
         Returns:
             True if speech completed successfully, False if interrupted.
         """
         try:
-            # Use macOS 'say' command
-            # -v specifies the voice
-            self.current_process = subprocess.Popen(
-                ['say', '-v', voice, text],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
+            # Clean up previous audio file
+            self._cleanup_audio_file()
 
-            # Wait for speech to complete
-            self.current_process.wait()
+            # Create temp file for audio
+            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as f:
+                self.current_audio_file = f.name
 
-            # Check if terminated by signal (user stopped/paused)
-            return_code = self.current_process.returncode
-            self.current_process = None
+            # Generate speech using edge-tts (async, so we run in event loop)
+            asyncio.run(self._generate_speech(text, voice_id, self.current_audio_file))
 
-            return return_code == 0
+            # Check if stopped during generation
+            if self.stop_event.is_set():
+                return False
+
+            # Play the audio
+            pygame.mixer.music.load(self.current_audio_file)
+            pygame.mixer.music.play()
+
+            # Wait for playback to complete
+            while pygame.mixer.music.get_busy():
+                if self.stop_event.is_set():
+                    pygame.mixer.music.stop()
+                    return False
+                if self.is_paused:
+                    # Wait while paused
+                    self.pause_event.wait()
+                    if self.stop_event.is_set():
+                        return False
+                pygame.time.wait(100)
+
+            return True
 
         except Exception as e:
             print(f"Speech error: {e}")
             return False
+
+    async def _generate_speech(self, text: str, voice_id: str, output_file: str):
+        """
+        Generate speech audio using edge-tts.
+
+        Args:
+            text: The text to convert to speech.
+            voice_id: The edge-tts voice ID.
+            output_file: Path to save the audio file.
+        """
+        communicate = edge_tts.Communicate(text, voice_id)
+        await communicate.save(output_file)
 
 
 class MoltReaderApp:
@@ -572,13 +622,13 @@ class MoltReaderApp:
 
     Creates the GUI and coordinates all components:
     - URL input field
-    - Audio controls (Play, Pause, Stop, Quit)
+    - Audio controls (Play, Pause, Skip, Stop, Quit)
     - Status display
     """
 
     def __init__(self):
         # Initialize components
-        self.voice_manager = MacOSVoiceManager()
+        self.voice_manager = EdgeTTSVoiceManager()
         self.scraper = MoltbookScraper()
         self.tts_engine = TextToSpeechEngine(self.voice_manager)
 
@@ -616,7 +666,7 @@ class MoltReaderApp:
 
         # URL entry field
         self.url_var = tk.StringVar()
-        self.url_entry = ttk.Entry(url_frame, textvariable=self.url_var, font=('Menlo', 12))
+        self.url_entry = ttk.Entry(url_frame, textvariable=self.url_var, font=('TkDefaultFont', 12))
         self.url_entry.grid(row=0, column=0, sticky="ew", padx=(0, 5))
 
         # Load button
@@ -632,7 +682,7 @@ class MoltReaderApp:
 
         # Center the buttons
         controls_frame.columnconfigure(0, weight=1)
-        controls_frame.columnconfigure(5, weight=1)
+        controls_frame.columnconfigure(6, weight=1)
 
         # Play button
         self.play_btn = ttk.Button(
@@ -652,6 +702,15 @@ class MoltReaderApp:
         )
         self.pause_btn.grid(row=0, column=2, padx=5)
 
+        # Skip button
+        self.skip_btn = ttk.Button(
+            controls_frame,
+            text="⏭ Skip",
+            command=self._on_skip,
+            width=10
+        )
+        self.skip_btn.grid(row=0, column=3, padx=5)
+
         # Stop button
         self.stop_btn = ttk.Button(
             controls_frame,
@@ -659,7 +718,7 @@ class MoltReaderApp:
             command=self._on_stop,
             width=10
         )
-        self.stop_btn.grid(row=0, column=3, padx=5)
+        self.stop_btn.grid(row=0, column=4, padx=5)
 
         # Quit button
         self.quit_btn = ttk.Button(
@@ -668,7 +727,7 @@ class MoltReaderApp:
             command=self._on_quit,
             width=10
         )
-        self.quit_btn.grid(row=0, column=4, padx=5)
+        self.quit_btn.grid(row=0, column=5, padx=5)
 
         # --- Status Section (compact, for speaker/voice info) ---
         status_frame = ttk.LabelFrame(main_frame, text="Now Playing", padding="5")
@@ -680,7 +739,7 @@ class MoltReaderApp:
         self.status_label = ttk.Label(
             status_frame,
             textvariable=self.status_var,
-            font=('Menlo', 11),
+            font=('TkDefaultFont', 11),
             wraplength=550
         )
         self.status_label.grid(row=0, column=0, sticky="ew")
@@ -697,7 +756,7 @@ class MoltReaderApp:
             text_frame,
             height=10,
             state='disabled',
-            font=('Menlo', 11),
+            font=('TkDefaultFont', 11),
             wrap='word'
         )
         self.current_text.grid(row=0, column=0, sticky="nsew")
@@ -770,9 +829,16 @@ class MoltReaderApp:
         self._update_status("Stopped. Ready to play from beginning.")
         self._update_current_text("")  # Clear the text display
 
+    def _on_skip(self):
+        """Handle Skip button click - skip to next item."""
+        if self.tts_engine.is_playing:
+            self.tts_engine.skip()
+            self._update_status("Skipping...")
+
     def _on_quit(self):
         """Handle Quit button or window close."""
         self.tts_engine.stop()
+        pygame.mixer.quit()
         self.root.destroy()
 
     def _update_status(self, message: str):
@@ -805,7 +871,7 @@ class MoltReaderApp:
 def main():
     """Entry point for MoltReader application."""
     print("Starting MoltReader...")
-    print(f"Available voices: {MacOSVoiceManager().available_voices}")
+    print(f"Available voices: {len(EdgeTTSVoiceManager().available_voices)} neural voices")
 
     app = MoltReaderApp()
     app.run()
