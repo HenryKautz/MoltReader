@@ -153,9 +153,9 @@ class MoltbookScraper:
     """
     Scrapes Moltbook pages to extract posts and comments.
 
-    Parses the HTML structure of Moltbook to find:
-    - The main post author and content
-    - All comments with their authors and content
+    Moltbook HTML structure (as of 2024):
+    - Main post: Contains h1 title, author link (href="/u/..."), and .prose content
+    - Comments: Located after h2 "Comments", each in div.py-2 with author link and .prose content
     """
 
     # User agent to identify as a regular browser
@@ -204,7 +204,7 @@ class MoltbookScraper:
 
     def _extract_content(self, soup: BeautifulSoup) -> List[Tuple[str, str]]:
         """
-        Extract post and comment content from parsed HTML.
+        Extract post and comment content from Moltbook HTML.
 
         Args:
             soup: BeautifulSoup parsed HTML.
@@ -214,11 +214,7 @@ class MoltbookScraper:
         """
         content_items = []
 
-        # Strategy 1: Look for common post/comment structures
-        # Moltbook likely uses semantic HTML or data attributes
-
-        # Try to find the main post first
-        # Common patterns: article, .post, .content, [data-post], etc.
+        # Find the main post
         main_post = self._find_main_post(soup)
         if main_post:
             content_items.append(main_post)
@@ -227,149 +223,143 @@ class MoltbookScraper:
         comments = self._find_comments(soup)
         content_items.extend(comments)
 
-        # If structured extraction failed, try a more generic approach
-        if not content_items:
-            content_items = self._generic_extraction(soup)
-
         return content_items
 
     def _find_main_post(self, soup: BeautifulSoup) -> Optional[Tuple[str, str]]:
         """
         Find the main post on the page.
 
-        Looks for common HTML patterns used for main post content.
+        Moltbook structure:
+        - Post title in <h1> with class containing "text-xl"
+        - Author in <a href="/u/username">
+        - Content in <div class="prose prose-invert ...">
         """
-        # Try various selectors that might contain the main post
-        selectors = [
-            'article.post',
-            '[data-testid="post"]',
-            '.post-content',
-            'article',
-            '.post',
-            'main article',
-            '[role="article"]',
-        ]
+        # Find the main post title
+        title_elem = soup.select_one('h1.text-xl')
+        if not title_elem:
+            return None
 
-        for selector in selectors:
-            element = soup.select_one(selector)
-            if element:
-                author = self._extract_author(element) or "Author"
-                content = self._extract_text_content(element)
-                if content and len(content) > 50:  # Minimum content length
-                    return (author, content)
+        # Get the title text
+        title = title_elem.get_text(strip=True)
 
-        return None
+        # Find the post container (parent elements of the title)
+        post_container = title_elem.find_parent('div', class_=lambda c: c and 'flex-1' in c)
+        if not post_container:
+            # Try to find by going up to the rounded-lg container
+            post_container = title_elem.find_parent('div', class_=lambda c: c and 'rounded-lg' in c)
+
+        if not post_container:
+            return None
+
+        # Extract author from the "Posted by u/username" link
+        author = "Author"
+        author_link = post_container.select_one('a[href^="/u/"]')
+        if author_link:
+            author = author_link.get_text(strip=True)
+            # Remove "u/" prefix if present for cleaner speech
+            if author.startswith('u/'):
+                author = author[2:]
+
+        # Extract content from prose div
+        prose_div = post_container.select_one('div.prose')
+        if prose_div:
+            content = self._extract_prose_text(prose_div)
+        else:
+            content = ""
+
+        # Combine title and content for reading
+        full_text = f"{title}. {content}" if content else title
+
+        return (author, full_text)
 
     def _find_comments(self, soup: BeautifulSoup) -> List[Tuple[str, str]]:
         """
         Find all comments on the page.
 
-        Looks for common HTML patterns used for comments.
+        Moltbook structure:
+        - Comments section starts after <h2> containing "Comments"
+        - Each comment is in a <div class="py-2">
+        - Author in <a href="/u/username" class="...font-medium...">
+        - Content in <div class="prose prose-invert ...">
         """
         comments = []
 
-        # Try various selectors for comment containers
-        comment_selectors = [
-            '[data-testid="comment"]',
-            '.comment',
-            '.reply',
-            '[role="comment"]',
-            'article.comment',
-            '.comment-content',
-        ]
+        # Find the comments section header
+        comments_header = soup.find('h2', string=lambda s: s and 'Comments' in s)
+        if not comments_header:
+            # Try finding by class pattern
+            comments_header = soup.find('h2', class_=lambda c: c and 'text-lg' in c and 'font-bold' in c)
 
-        for selector in comment_selectors:
-            elements = soup.select(selector)
-            if elements:
-                for element in elements:
-                    author = self._extract_author(element) or "Commenter"
-                    content = self._extract_text_content(element)
-                    if content and len(content) > 10:
-                        comments.append((author, content))
-                if comments:
-                    break
+        if not comments_header:
+            return comments
+
+        # Find the comments container (sibling or parent's next element)
+        comments_container = comments_header.find_next_sibling('div')
+        if not comments_container:
+            # Try parent's structure
+            parent = comments_header.parent
+            if parent:
+                comments_container = parent.select_one('div.rounded-lg')
+
+        if not comments_container:
+            return comments
+
+        # Find all individual comments (div.py-2 contains each comment)
+        comment_divs = comments_container.select('div.py-2')
+
+        for comment_div in comment_divs:
+            # Extract author
+            author = "Commenter"
+            author_link = comment_div.select_one('a[href^="/u/"]')
+            if author_link:
+                author = author_link.get_text(strip=True)
+                # Remove "u/" prefix for cleaner speech
+                if author.startswith('u/'):
+                    author = author[2:]
+
+            # Extract content from prose div
+            prose_div = comment_div.select_one('div.prose')
+            if prose_div:
+                content = self._extract_prose_text(prose_div)
+                if content:
+                    comments.append((author, content))
 
         return comments
 
-    def _extract_author(self, element) -> Optional[str]:
+    def _extract_prose_text(self, prose_element) -> str:
         """
-        Extract the author name from a post or comment element.
+        Extract clean text from a Moltbook prose div.
+
+        Handles paragraphs, emphasis, code blocks, and lists.
         """
-        # Common patterns for author names
-        author_selectors = [
-            '[data-testid="author"]',
-            '.author',
-            '.username',
-            '.user-name',
-            '.poster',
-            'a[href*="/user/"]',
-            'a[href*="/profile/"]',
-            '.display-name',
-            '[rel="author"]',
-        ]
+        if not prose_element:
+            return ""
 
-        for selector in author_selectors:
-            author_elem = element.select_one(selector)
-            if author_elem:
-                text = author_elem.get_text(strip=True)
-                if text:
-                    return text
+        # Collect text from all paragraph and list elements
+        text_parts = []
 
-        return None
+        # Get all text-containing elements
+        for elem in prose_element.find_all(['p', 'li', 'pre', 'code', 'em', 'strong'], recursive=True):
+            # Skip nested elements we'll process at their parent level
+            if elem.parent.name in ['p', 'li']:
+                continue
 
-    def _extract_text_content(self, element) -> str:
-        """
-        Extract readable text content from an element.
+            text = elem.get_text(separator=' ', strip=True)
+            if text:
+                text_parts.append(text)
 
-        Removes scripts, styles, and navigation elements.
-        """
-        # Clone element to avoid modifying original
-        from copy import copy
-        element = copy(element)
+        # If no structured elements found, get all text
+        if not text_parts:
+            text = prose_element.get_text(separator=' ', strip=True)
+            text_parts = [text] if text else []
 
-        # Remove non-content elements
-        for tag in element.find_all(['script', 'style', 'nav', 'header', 'footer', 'button']):
-            tag.decompose()
-
-        # Get text with proper spacing
-        text = element.get_text(separator=' ', strip=True)
+        # Join with proper spacing
+        full_text = ' '.join(text_parts)
 
         # Clean up whitespace
-        text = re.sub(r'\s+', ' ', text)
+        full_text = re.sub(r'\s+', ' ', full_text)
 
-        return text.strip()
-
-    def _generic_extraction(self, soup: BeautifulSoup) -> List[Tuple[str, str]]:
-        """
-        Fallback generic extraction when structured parsing fails.
-
-        Attempts to find any meaningful text content on the page.
-        """
-        content_items = []
-
-        # Remove definitely non-content elements
-        for tag in soup.find_all(['script', 'style', 'nav', 'header', 'footer', 'aside']):
-            tag.decompose()
-
-        # Look for main content area
-        main = soup.find('main') or soup.find('body')
-        if main:
-            # Find all paragraph-like elements
-            for elem in main.find_all(['p', 'div'], recursive=True):
-                text = elem.get_text(strip=True)
-                # Filter for substantial content
-                if text and len(text) > 100:
-                    content_items.append(("Speaker", text))
-
-        # Remove duplicates while preserving order
-        seen = set()
-        unique_items = []
-        for item in content_items:
-            if item[1] not in seen:
-                seen.add(item[1])
-                unique_items.append(item)
-
-        return unique_items[:20]  # Limit to prevent endless reading
+        return full_text.strip()
 
 
 class TextToSpeechEngine:
