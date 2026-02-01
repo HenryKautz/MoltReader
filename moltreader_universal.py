@@ -650,9 +650,8 @@ class MoltReaderApp:
         self.load_btn = ttk.Button(url_frame, text="Load", command=self._on_load)
         self.load_btn.grid(row=0, column=1)
 
-        # Placeholder text
-        self.url_entry.insert(0, "https://www.moltbook.com/post/...")
-        self.url_entry.bind("<FocusIn>", self._on_url_focus)
+        # Default URL
+        self.url_entry.insert(0, "https://www.moltbook.com/post/39a5bb00-3de9-4b0a-bfa2-314dc643fdb3")
 
         # --- Audio Controls Section ---
         controls_frame = ttk.LabelFrame(main_frame, text="Audio Controls", padding="10")
@@ -735,16 +734,11 @@ class MoltReaderApp:
         scrollbar.grid(row=0, column=1, sticky='ns')
         self.current_text.configure(yscrollcommand=scrollbar.set)
 
-    def _on_url_focus(self, event):
-        """Clear placeholder text when URL field is focused."""
-        if self.url_var.get().startswith("https://www.moltbook.com/post/..."):
-            self.url_entry.delete(0, tk.END)
-
     def _on_load(self):
         """Handle Load button click - fetch and parse the Moltbook page."""
         url = self.url_var.get().strip()
 
-        if not url or url.startswith("https://www.moltbook.com/post/..."):
+        if not url:
             messagebox.showwarning("No URL", "Please enter a Moltbook URL.")
             return
 
