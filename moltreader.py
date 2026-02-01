@@ -1,0 +1,769 @@
+#!/usr/bin/env python3
+"""
+MoltReader - A Text-to-Speech Reader for Moltbook Posts
+
+This program reads Moltbook posts and comments aloud using macOS text-to-speech.
+Each poster/commenter is assigned a unique voice (chosen randomly) that persists
+throughout the reading session.
+
+Requirements:
+    - macOS (uses built-in 'say' command for text-to-speech)
+    - Python 3.7+
+    - requests: pip install requests
+    - beautifulsoup4: pip install beautifulsoup4
+
+Usage:
+    python moltreader.py
+
+License: MIT (Open Source)
+"""
+
+import tkinter as tk
+from tkinter import ttk, messagebox
+import subprocess
+import threading
+import random
+import re
+from typing import Dict, List, Tuple, Optional
+import queue
+
+# Third-party imports (need to be installed)
+try:
+    import requests
+    from bs4 import BeautifulSoup
+except ImportError as e:
+    print("Please install required packages:")
+    print("  pip install requests beautifulsoup4")
+    raise e
+
+
+class MacOSVoiceManager:
+    """
+    Manages macOS text-to-speech voices.
+
+    Uses the built-in 'say' command which is available on all macOS systems.
+    Discovers available voices and assigns them randomly to speakers.
+    """
+
+    def __init__(self):
+        # Dictionary mapping agent names to their assigned voices
+        self.agent_voices: Dict[str, str] = {}
+
+        # Get list of available voices from macOS
+        self.available_voices = self._get_available_voices()
+
+        # Keep track of which voices have been assigned
+        self.assigned_voices: List[str] = []
+
+    def _get_available_voices(self) -> List[str]:
+        """
+        Query macOS for available text-to-speech voices.
+
+        Returns:
+            List of voice names available on this system.
+        """
+        try:
+            # Run 'say -v ?' to get list of all available voices
+            result = subprocess.run(
+                ['say', '-v', '?'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+
+            voices = []
+            for line in result.stdout.strip().split('\n'):
+                # Each line format: "VoiceName  language  # Sample text"
+                # Extract just the voice name (first word/phrase before the language code)
+                if line.strip():
+                    # Voice name is everything before the language code (e.g., "en_US")
+                    match = re.match(r'^(\S+)', line)
+                    if match:
+                        voices.append(match.group(1))
+
+            # Filter to prefer English voices for better pronunciation
+            english_voices = [v for v in voices if self._is_english_voice(v)]
+
+            # If we have English voices, prefer those; otherwise use all
+            return english_voices if english_voices else voices
+
+        except subprocess.CalledProcessError:
+            # Fallback to some common macOS voices if query fails
+            return ['Alex', 'Samantha', 'Victoria', 'Tom', 'Karen', 'Daniel']
+
+    def _is_english_voice(self, voice_name: str) -> bool:
+        """
+        Check if a voice is likely an English voice based on its name.
+
+        This is a heuristic - we check against known English voice names.
+        """
+        # Common English voice names on macOS
+        english_names = [
+            'Alex', 'Samantha', 'Victoria', 'Tom', 'Karen', 'Daniel',
+            'Moira', 'Tessa', 'Veena', 'Fiona', 'Rishi', 'Aaron',
+            'Nicky', 'Allison', 'Ava', 'Susan', 'Zoe', 'Evan',
+            'Nathan', 'Oliver', 'Matilda', 'Reed', 'Rocko', 'Sandy',
+            'Shelley', 'Fred', 'Ralph', 'Kathy', 'Vicki', 'Bruce',
+            'Junior', 'Albert', 'Bahh', 'Bells', 'Boing', 'Bubbles',
+            'Cellos', 'Deranged', 'Good', 'Hysterical', 'Organ', 'Bad',
+            'Trinoids', 'Whisper', 'Wobble', 'Zarvox'
+        ]
+        return voice_name in english_names
+
+    def get_voice_for_agent(self, agent_name: str) -> str:
+        """
+        Get or assign a voice for a given agent (poster/commenter).
+
+        If the agent already has a voice assigned, return that voice.
+        Otherwise, assign a new random voice (preferring unassigned voices).
+
+        Args:
+            agent_name: The name/identifier of the poster or commenter.
+
+        Returns:
+            The voice name to use for this agent.
+        """
+        # Check if agent already has a voice assigned
+        if agent_name in self.agent_voices:
+            return self.agent_voices[agent_name]
+
+        # Find voices that haven't been assigned yet
+        unassigned = [v for v in self.available_voices if v not in self.assigned_voices]
+
+        if unassigned:
+            # Pick a random unassigned voice
+            voice = random.choice(unassigned)
+        else:
+            # All voices used - pick a random one (allowing reuse)
+            voice = random.choice(self.available_voices)
+
+        # Remember the assignment
+        self.agent_voices[agent_name] = voice
+        self.assigned_voices.append(voice)
+
+        return voice
+
+    def reset(self):
+        """Reset all voice assignments for a new reading session."""
+        self.agent_voices.clear()
+        self.assigned_voices.clear()
+
+
+class MoltbookScraper:
+    """
+    Scrapes Moltbook pages to extract posts and comments.
+
+    Parses the HTML structure of Moltbook to find:
+    - The main post author and content
+    - All comments with their authors and content
+    """
+
+    # User agent to identify as a regular browser
+    HEADERS = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+    }
+
+    def fetch_page(self, url: str) -> Tuple[List[Tuple[str, str]], Optional[str]]:
+        """
+        Fetch and parse a Moltbook page.
+
+        Args:
+            url: The URL of the Moltbook post.
+
+        Returns:
+            Tuple of:
+            - List of (agent_name, text_content) tuples in reading order
+            - Error message if any, or None on success
+        """
+        try:
+            # Validate URL is from moltbook.com
+            if 'moltbook.com' not in url:
+                return [], "URL must be from moltbook.com"
+
+            # Fetch the page
+            response = requests.get(url, headers=self.HEADERS, timeout=30)
+            response.raise_for_status()
+
+            # Parse HTML
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            # Extract posts and comments
+            content_items = self._extract_content(soup)
+
+            if not content_items:
+                return [], "No posts or comments found on this page"
+
+            return content_items, None
+
+        except requests.exceptions.Timeout:
+            return [], "Request timed out. Please try again."
+        except requests.exceptions.RequestException as e:
+            return [], f"Failed to fetch page: {str(e)}"
+        except Exception as e:
+            return [], f"Error parsing page: {str(e)}"
+
+    def _extract_content(self, soup: BeautifulSoup) -> List[Tuple[str, str]]:
+        """
+        Extract post and comment content from parsed HTML.
+
+        Args:
+            soup: BeautifulSoup parsed HTML.
+
+        Returns:
+            List of (author_name, content_text) tuples.
+        """
+        content_items = []
+
+        # Strategy 1: Look for common post/comment structures
+        # Moltbook likely uses semantic HTML or data attributes
+
+        # Try to find the main post first
+        # Common patterns: article, .post, .content, [data-post], etc.
+        main_post = self._find_main_post(soup)
+        if main_post:
+            content_items.append(main_post)
+
+        # Find all comments
+        comments = self._find_comments(soup)
+        content_items.extend(comments)
+
+        # If structured extraction failed, try a more generic approach
+        if not content_items:
+            content_items = self._generic_extraction(soup)
+
+        return content_items
+
+    def _find_main_post(self, soup: BeautifulSoup) -> Optional[Tuple[str, str]]:
+        """
+        Find the main post on the page.
+
+        Looks for common HTML patterns used for main post content.
+        """
+        # Try various selectors that might contain the main post
+        selectors = [
+            'article.post',
+            '[data-testid="post"]',
+            '.post-content',
+            'article',
+            '.post',
+            'main article',
+            '[role="article"]',
+        ]
+
+        for selector in selectors:
+            element = soup.select_one(selector)
+            if element:
+                author = self._extract_author(element) or "Author"
+                content = self._extract_text_content(element)
+                if content and len(content) > 50:  # Minimum content length
+                    return (author, content)
+
+        return None
+
+    def _find_comments(self, soup: BeautifulSoup) -> List[Tuple[str, str]]:
+        """
+        Find all comments on the page.
+
+        Looks for common HTML patterns used for comments.
+        """
+        comments = []
+
+        # Try various selectors for comment containers
+        comment_selectors = [
+            '[data-testid="comment"]',
+            '.comment',
+            '.reply',
+            '[role="comment"]',
+            'article.comment',
+            '.comment-content',
+        ]
+
+        for selector in comment_selectors:
+            elements = soup.select(selector)
+            if elements:
+                for element in elements:
+                    author = self._extract_author(element) or "Commenter"
+                    content = self._extract_text_content(element)
+                    if content and len(content) > 10:
+                        comments.append((author, content))
+                if comments:
+                    break
+
+        return comments
+
+    def _extract_author(self, element) -> Optional[str]:
+        """
+        Extract the author name from a post or comment element.
+        """
+        # Common patterns for author names
+        author_selectors = [
+            '[data-testid="author"]',
+            '.author',
+            '.username',
+            '.user-name',
+            '.poster',
+            'a[href*="/user/"]',
+            'a[href*="/profile/"]',
+            '.display-name',
+            '[rel="author"]',
+        ]
+
+        for selector in author_selectors:
+            author_elem = element.select_one(selector)
+            if author_elem:
+                text = author_elem.get_text(strip=True)
+                if text:
+                    return text
+
+        return None
+
+    def _extract_text_content(self, element) -> str:
+        """
+        Extract readable text content from an element.
+
+        Removes scripts, styles, and navigation elements.
+        """
+        # Clone element to avoid modifying original
+        from copy import copy
+        element = copy(element)
+
+        # Remove non-content elements
+        for tag in element.find_all(['script', 'style', 'nav', 'header', 'footer', 'button']):
+            tag.decompose()
+
+        # Get text with proper spacing
+        text = element.get_text(separator=' ', strip=True)
+
+        # Clean up whitespace
+        text = re.sub(r'\s+', ' ', text)
+
+        return text.strip()
+
+    def _generic_extraction(self, soup: BeautifulSoup) -> List[Tuple[str, str]]:
+        """
+        Fallback generic extraction when structured parsing fails.
+
+        Attempts to find any meaningful text content on the page.
+        """
+        content_items = []
+
+        # Remove definitely non-content elements
+        for tag in soup.find_all(['script', 'style', 'nav', 'header', 'footer', 'aside']):
+            tag.decompose()
+
+        # Look for main content area
+        main = soup.find('main') or soup.find('body')
+        if main:
+            # Find all paragraph-like elements
+            for elem in main.find_all(['p', 'div'], recursive=True):
+                text = elem.get_text(strip=True)
+                # Filter for substantial content
+                if text and len(text) > 100:
+                    content_items.append(("Speaker", text))
+
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_items = []
+        for item in content_items:
+            if item[1] not in seen:
+                seen.add(item[1])
+                unique_items.append(item)
+
+        return unique_items[:20]  # Limit to prevent endless reading
+
+
+class TextToSpeechEngine:
+    """
+    Manages text-to-speech playback using macOS 'say' command.
+
+    Supports play, pause, and stop functionality.
+    Runs speech in a background thread to keep UI responsive.
+    """
+
+    def __init__(self, voice_manager: MacOSVoiceManager):
+        self.voice_manager = voice_manager
+
+        # Current playback state
+        self.is_playing = False
+        self.is_paused = False
+
+        # Queue of content items to read
+        self.content_queue: List[Tuple[str, str]] = []
+        self.current_index = 0
+
+        # Threading components
+        self.speech_thread: Optional[threading.Thread] = None
+        self.current_process: Optional[subprocess.Popen] = None
+        self.stop_event = threading.Event()
+        self.pause_event = threading.Event()
+
+        # Callback for status updates
+        self.status_callback = None
+
+    def set_content(self, content_items: List[Tuple[str, str]]):
+        """
+        Set the content to be read.
+
+        Args:
+            content_items: List of (author, text) tuples.
+        """
+        self.content_queue = content_items
+        self.current_index = 0
+
+    def play(self):
+        """Start or resume playback."""
+        if self.is_paused:
+            # Resume from pause
+            self.is_paused = False
+            self.pause_event.set()
+            return
+
+        if self.is_playing:
+            return  # Already playing
+
+        if not self.content_queue:
+            return  # Nothing to play
+
+        # Start fresh playback
+        self.is_playing = True
+        self.is_paused = False
+        self.stop_event.clear()
+        self.pause_event.set()
+
+        # Start speech in background thread
+        self.speech_thread = threading.Thread(target=self._speech_loop, daemon=True)
+        self.speech_thread.start()
+
+    def pause(self):
+        """Pause playback."""
+        if self.is_playing and not self.is_paused:
+            self.is_paused = True
+            self.pause_event.clear()
+
+            # Kill current speech process to pause immediately
+            if self.current_process:
+                self.current_process.terminate()
+
+    def stop(self):
+        """Stop playback and reset to beginning."""
+        self.stop_event.set()
+        self.pause_event.set()  # Unblock if paused
+
+        # Kill current speech process
+        if self.current_process:
+            self.current_process.terminate()
+            self.current_process = None
+
+        # Reset state
+        self.is_playing = False
+        self.is_paused = False
+        self.current_index = 0
+
+        # Reset voice assignments for fresh start
+        self.voice_manager.reset()
+
+    def _speech_loop(self):
+        """
+        Main speech loop - runs in background thread.
+
+        Iterates through content queue and speaks each item.
+        """
+        while self.current_index < len(self.content_queue):
+            # Check for stop signal
+            if self.stop_event.is_set():
+                break
+
+            # Check for pause - block until unpaused
+            self.pause_event.wait()
+
+            if self.stop_event.is_set():
+                break
+
+            # Get current item
+            author, text = self.content_queue[self.current_index]
+
+            # Get voice for this author
+            voice = self.voice_manager.get_voice_for_agent(author)
+
+            # Update status
+            if self.status_callback:
+                self.status_callback(f"Reading: {author} (voice: {voice})")
+
+            # Speak the text
+            success = self._speak(text, voice)
+
+            if not success or self.stop_event.is_set():
+                break
+
+            # Move to next item (only if not paused mid-speech)
+            if not self.is_paused:
+                self.current_index += 1
+
+        # Playback finished
+        self.is_playing = False
+        if self.status_callback and not self.stop_event.is_set():
+            self.status_callback("Finished reading")
+
+    def _speak(self, text: str, voice: str) -> bool:
+        """
+        Speak text using macOS 'say' command.
+
+        Args:
+            text: The text to speak.
+            voice: The voice name to use.
+
+        Returns:
+            True if speech completed successfully, False if interrupted.
+        """
+        try:
+            # Use macOS 'say' command
+            # -v specifies the voice
+            self.current_process = subprocess.Popen(
+                ['say', '-v', voice, text],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+
+            # Wait for speech to complete
+            self.current_process.wait()
+
+            # Check if terminated by signal (user stopped/paused)
+            return_code = self.current_process.returncode
+            self.current_process = None
+
+            return return_code == 0
+
+        except Exception as e:
+            print(f"Speech error: {e}")
+            return False
+
+
+class MoltReaderApp:
+    """
+    Main application class for MoltReader.
+
+    Creates the GUI and coordinates all components:
+    - URL input field
+    - Audio controls (Play, Pause, Stop, Quit)
+    - Status display
+    """
+
+    def __init__(self):
+        # Initialize components
+        self.voice_manager = MacOSVoiceManager()
+        self.scraper = MoltbookScraper()
+        self.tts_engine = TextToSpeechEngine(self.voice_manager)
+
+        # Set up TTS status callback
+        self.tts_engine.status_callback = self._update_status
+
+        # Create main window
+        self.root = tk.Tk()
+        self.root.title("MoltReader - Moltbook Text-to-Speech")
+        self.root.geometry("600x300")
+        self.root.minsize(500, 250)
+
+        # Configure grid weights for resizing
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(2, weight=1)
+
+        # Build UI
+        self._create_widgets()
+
+        # Handle window close
+        self.root.protocol("WM_DELETE_WINDOW", self._on_quit)
+
+    def _create_widgets(self):
+        """Create all UI widgets."""
+        # Main container with padding
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.grid(row=0, column=0, sticky="nsew")
+        main_frame.columnconfigure(1, weight=1)
+
+        # --- URL Input Section ---
+        url_frame = ttk.LabelFrame(main_frame, text="Moltbook URL", padding="5")
+        url_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        url_frame.columnconfigure(0, weight=1)
+
+        # URL entry field
+        self.url_var = tk.StringVar()
+        self.url_entry = ttk.Entry(url_frame, textvariable=self.url_var, font=('Menlo', 12))
+        self.url_entry.grid(row=0, column=0, sticky="ew", padx=(0, 5))
+
+        # Load button
+        self.load_btn = ttk.Button(url_frame, text="Load", command=self._on_load)
+        self.load_btn.grid(row=0, column=1)
+
+        # Placeholder text
+        self.url_entry.insert(0, "https://www.moltbook.com/post/...")
+        self.url_entry.bind("<FocusIn>", self._on_url_focus)
+
+        # --- Audio Controls Section ---
+        controls_frame = ttk.LabelFrame(main_frame, text="Audio Controls", padding="10")
+        controls_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+
+        # Center the buttons
+        controls_frame.columnconfigure(0, weight=1)
+        controls_frame.columnconfigure(5, weight=1)
+
+        # Play button
+        self.play_btn = ttk.Button(
+            controls_frame,
+            text="▶ Play",
+            command=self._on_play,
+            width=10
+        )
+        self.play_btn.grid(row=0, column=1, padx=5)
+
+        # Pause button
+        self.pause_btn = ttk.Button(
+            controls_frame,
+            text="⏸ Pause",
+            command=self._on_pause,
+            width=10
+        )
+        self.pause_btn.grid(row=0, column=2, padx=5)
+
+        # Stop button
+        self.stop_btn = ttk.Button(
+            controls_frame,
+            text="⏹ Stop",
+            command=self._on_stop,
+            width=10
+        )
+        self.stop_btn.grid(row=0, column=3, padx=5)
+
+        # Quit button
+        self.quit_btn = ttk.Button(
+            controls_frame,
+            text="✕ Quit",
+            command=self._on_quit,
+            width=10
+        )
+        self.quit_btn.grid(row=0, column=4, padx=5)
+
+        # --- Status Section ---
+        status_frame = ttk.LabelFrame(main_frame, text="Status", padding="5")
+        status_frame.grid(row=2, column=0, columnspan=2, sticky="nsew")
+        status_frame.columnconfigure(0, weight=1)
+        status_frame.rowconfigure(0, weight=1)
+
+        # Status text area
+        self.status_text = tk.Text(
+            status_frame,
+            height=6,
+            state='disabled',
+            font=('Menlo', 11),
+            wrap='word'
+        )
+        self.status_text.grid(row=0, column=0, sticky="nsew")
+
+        # Scrollbar for status
+        scrollbar = ttk.Scrollbar(status_frame, orient='vertical', command=self.status_text.yview)
+        scrollbar.grid(row=0, column=1, sticky='ns')
+        self.status_text.configure(yscrollcommand=scrollbar.set)
+
+        # Initial status
+        self._update_status("Ready. Paste a Moltbook URL and click Load.")
+
+    def _on_url_focus(self, event):
+        """Clear placeholder text when URL field is focused."""
+        if self.url_var.get().startswith("https://www.moltbook.com/post/..."):
+            self.url_entry.delete(0, tk.END)
+
+    def _on_load(self):
+        """Handle Load button click - fetch and parse the Moltbook page."""
+        url = self.url_var.get().strip()
+
+        if not url or url.startswith("https://www.moltbook.com/post/..."):
+            messagebox.showwarning("No URL", "Please enter a Moltbook URL.")
+            return
+
+        self._update_status(f"Loading: {url}")
+
+        # Fetch in background to keep UI responsive
+        def fetch_thread():
+            content, error = self.scraper.fetch_page(url)
+
+            # Update UI from main thread
+            self.root.after(0, lambda: self._on_fetch_complete(content, error))
+
+        threading.Thread(target=fetch_thread, daemon=True).start()
+
+    def _on_fetch_complete(self, content: List[Tuple[str, str]], error: Optional[str]):
+        """Handle completion of page fetch."""
+        if error:
+            self._update_status(f"Error: {error}")
+            messagebox.showerror("Load Error", error)
+            return
+
+        # Set content in TTS engine
+        self.tts_engine.set_content(content)
+        self.voice_manager.reset()
+
+        # Display what we found
+        status_lines = [f"Loaded {len(content)} items to read:"]
+        for author, text in content:
+            preview = text[:50] + "..." if len(text) > 50 else text
+            status_lines.append(f"  • {author}: {preview}")
+
+        self._update_status("\n".join(status_lines))
+
+    def _on_play(self):
+        """Handle Play button click."""
+        if not self.tts_engine.content_queue:
+            messagebox.showwarning("No Content", "Please load a Moltbook page first.")
+            return
+
+        self.tts_engine.play()
+        self._update_status("Playing...")
+
+    def _on_pause(self):
+        """Handle Pause button click."""
+        if self.tts_engine.is_playing:
+            if self.tts_engine.is_paused:
+                self.tts_engine.play()  # Resume
+                self._update_status("Resumed")
+            else:
+                self.tts_engine.pause()
+                self._update_status("Paused")
+
+    def _on_stop(self):
+        """Handle Stop button click - stop and reset to beginning."""
+        self.tts_engine.stop()
+        self._update_status("Stopped. Ready to play from beginning.")
+
+    def _on_quit(self):
+        """Handle Quit button or window close."""
+        self.tts_engine.stop()
+        self.root.destroy()
+
+    def _update_status(self, message: str):
+        """
+        Update the status text area.
+
+        Args:
+            message: Status message to display.
+        """
+        self.status_text.configure(state='normal')
+        self.status_text.delete(1.0, tk.END)
+        self.status_text.insert(tk.END, message)
+        self.status_text.configure(state='disabled')
+        self.status_text.see(tk.END)
+
+    def run(self):
+        """Start the application main loop."""
+        self.root.mainloop()
+
+
+def main():
+    """Entry point for MoltReader application."""
+    print("Starting MoltReader...")
+    print(f"Available voices: {MacOSVoiceManager().available_voices}")
+
+    app = MoltReaderApp()
+    app.run()
+
+
+if __name__ == "__main__":
+    main()
