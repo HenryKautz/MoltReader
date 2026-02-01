@@ -509,9 +509,10 @@ class TextToSpeechEngine:
             # Get voice for this author
             voice = self.voice_manager.get_voice_for_agent(author)
 
-            # Update status
+            # Update status with author, voice, and text content
             if self.status_callback:
-                self.status_callback(f"Reading: {author} (voice: {voice})")
+                progress = f"[{self.current_index + 1}/{len(self.content_queue)}]"
+                self.status_callback(f"{progress} {author} (voice: {voice}):\n\n{text}")
 
             # Speak the text
             success = self._speak(text, voice)
