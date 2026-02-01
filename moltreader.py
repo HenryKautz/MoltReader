@@ -9,7 +9,7 @@ throughout the reading session.
 Requirements:
     - macOS (uses built-in 'say' command for text-to-speech)
     - Python 3.7+
-    - requests: pip install requests
+    - playwright: pip install playwright && playwright install chromium
     - beautifulsoup4: pip install beautifulsoup4
 
 Usage:
@@ -29,11 +29,12 @@ import queue
 
 # Third-party imports (need to be installed)
 try:
-    import requests
     from bs4 import BeautifulSoup
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 except ImportError as e:
     print("Please install required packages:")
-    print("  pip install requests beautifulsoup4")
+    print("  pip install beautifulsoup4 playwright")
+    print("  playwright install chromium")
     raise e
 
 
@@ -153,19 +154,18 @@ class MoltbookScraper:
     """
     Scrapes Moltbook pages to extract posts and comments.
 
+    Uses Playwright headless browser to render JavaScript content.
+
     Moltbook HTML structure (as of 2024):
     - Main post: Contains h1 title, author link (href="/u/..."), and .prose content
     - Comments: Located after h2 "Comments", each in div.py-2 with author link and .prose content
     """
 
-    # User agent to identify as a regular browser
-    HEADERS = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-    }
-
     def fetch_page(self, url: str) -> Tuple[List[Tuple[str, str]], Optional[str]]:
         """
-        Fetch and parse a Moltbook page.
+        Fetch and parse a Moltbook page using headless browser.
+
+        Uses Playwright to render JavaScript and get fully loaded content.
 
         Args:
             url: The URL of the Moltbook post.
@@ -180,12 +180,11 @@ class MoltbookScraper:
             if 'moltbook.com' not in url:
                 return [], "URL must be from moltbook.com"
 
-            # Fetch the page
-            response = requests.get(url, headers=self.HEADERS, timeout=30)
-            response.raise_for_status()
+            # Use Playwright to fetch and render the page
+            html_content = self._fetch_with_playwright(url)
 
             # Parse HTML
-            soup = BeautifulSoup(response.text, 'html.parser')
+            soup = BeautifulSoup(html_content, 'html.parser')
 
             # Extract posts and comments
             content_items = self._extract_content(soup)
@@ -195,12 +194,47 @@ class MoltbookScraper:
 
             return content_items, None
 
-        except requests.exceptions.Timeout:
-            return [], "Request timed out. Please try again."
-        except requests.exceptions.RequestException as e:
-            return [], f"Failed to fetch page: {str(e)}"
+        except PlaywrightTimeout:
+            return [], "Page load timed out. Please try again."
         except Exception as e:
-            return [], f"Error parsing page: {str(e)}"
+            return [], f"Error fetching page: {str(e)}"
+
+    def _fetch_with_playwright(self, url: str) -> str:
+        """
+        Fetch a page using Playwright headless browser.
+
+        Waits for the page to fully render before extracting HTML.
+
+        Args:
+            url: The URL to fetch.
+
+        Returns:
+            The fully rendered HTML content.
+        """
+        with sync_playwright() as p:
+            # Launch headless Chromium browser
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            # Navigate to the URL
+            page.goto(url, wait_until='networkidle', timeout=30000)
+
+            # Wait for the main post content to appear
+            # This ensures JavaScript has rendered the content
+            page.wait_for_selector('h1.text-xl', timeout=15000)
+
+            # Also wait for comments to load
+            try:
+                page.wait_for_selector('h2:has-text("Comments")', timeout=10000)
+            except PlaywrightTimeout:
+                pass  # Comments section might not exist, continue anyway
+
+            # Get the fully rendered HTML
+            html_content = page.content()
+
+            browser.close()
+
+            return html_content
 
     def _extract_content(self, soup: BeautifulSoup) -> List[Tuple[str, str]]:
         """

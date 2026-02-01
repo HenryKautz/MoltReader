@@ -24,6 +24,9 @@ cd MoltReader
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Install Chromium browser for Playwright (required for JavaScript rendering)
+playwright install chromium
 ```
 
 ## Usage
@@ -40,8 +43,8 @@ python moltreader.py
 
 ## How It Works
 
-1. **Fetches** the Moltbook page using HTTP requests
-2. **Parses** the HTML to extract post content and comments
+1. **Fetches** the Moltbook page using Playwright headless browser (renders JavaScript)
+2. **Parses** the rendered HTML to extract post content and comments
 3. **Assigns** random macOS voices to each unique author
 4. **Speaks** each post/comment using the assigned voice via the `say` command
 
