@@ -273,6 +273,32 @@ class MoltbookScraper:
         # Extract author from the "Posted by u/username" link
         author = "Author"
         author_link = post_container.select_one('a[href^="/u/"]')
+
+        # If not found in post_container, search in parent elements
+        if not author_link:
+            parent = post_container.parent
+            if parent:
+                author_link = parent.select_one('a[href^="/u/"]')
+
+        # If still not found, look near the title element
+        if not author_link:
+            parent_of_title = title_elem.parent
+            if parent_of_title:
+                author_link = parent_of_title.select_one('a[href^="/u/"]')
+
+        # If still not found, search the whole page for the first user link before comments
+        if not author_link:
+            # Find comments header to know where to stop
+            comments_header = soup.find('h2', string=lambda s: s and 'Comments' in s)
+            all_user_links = soup.select('a[href^="/u/"]')
+            for link in all_user_links:
+                # Use the first user link found (which should be the post author)
+                # Stop if we've reached the comments section
+                if comments_header and link.find_parent() == comments_header.find_parent():
+                    break
+                author_link = link
+                break
+
         if author_link:
             author = author_link.get_text(strip=True)
             # Remove "u/" prefix if present for cleaner speech
@@ -533,8 +559,9 @@ class TextToSpeechEngine:
             if self.text_callback:
                 self.text_callback(text)
 
-            # Speak the text
-            success = self._speak(text, voice_id)
+            # Speak the text with author introduction
+            text_with_intro = f"{author} says, {text}"
+            success = self._speak(text_with_intro, voice_id)
 
             # Check if skip was requested (speech was interrupted but we should continue)
             if self.skip_requested:
